@@ -2,10 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys\timeb.h>
 
 #include <CL/cl.h>
 
 #define MAX_SOURCE_SIZE (0x100000)
+
+struct timeb progStart, progEnd;
 
 cl_program load_program(cl_context context, char* filename, cl_int* errcode_ret);
 
@@ -13,7 +16,7 @@ char BIN_PATH[255];
 int main(int argc, char *argv[])
 {
     strcpy(BIN_PATH, argv[0]);
-    for (int i = strlen(BIN_PATH) - 1; i >= 0; i--)
+    for (size_t i = strlen(BIN_PATH) - 1; i >= 0; i--)
     {
         if (BIN_PATH[i] == '/' || BIN_PATH[i] == '\\')
         {
@@ -33,10 +36,25 @@ int main(int argc, char *argv[])
     ret |= clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_DEFAULT, 1, &device_id, NULL);
     cl_context context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &ret);
     cl_command_queue command_queue = clCreateCommandQueue(context, device_id, 0, &ret);
+    
+    size_t info;
+    clGetDeviceInfo(
+    device_id,
+    CL_DEVICE_MAX_WORK_GROUP_SIZE,
+    sizeof(info),
+    &info,
+    NULL);
+
+    // for (int i=0; i < 3; i++)
+    //     printf("Info: %llu\n", info[i]);
+
+    // printf("Info: %llu\n", info);
 
 #pragma endregion OPENCL_INIT
 
 #pragma region KERNEL_EXEC
+
+    ftime(&progStart); 
 
     cl_program program = load_program(context, "kernels/main.cl", &ret);
     ret |= clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
@@ -49,24 +67,26 @@ int main(int argc, char *argv[])
     
     cl_kernel kernel;
 
-    // cl_mem pop_mem =  clCreateBuffer(
-    //     context,
-    //     CL_MEM_COPY_HOST_PTR,
-    //     SIZE,
-    //     HOST_PTR,
-    //     &ret);
+    int res;
+    cl_mem res_mem =  clCreateBuffer(
+        context,
+        CL_MEM_READ_WRITE,
+        sizeof(res),
+        NULL,
+        &ret);
     
     // Run kernel > main
     kernel = clCreateKernel(program, "main", &ret);
-    // ret |= clSetKernelArg(kernel, 0, sizeof(unsigned long), &initstate);
-    global_item_size[0] = 1;
-    local_item_size[0] = 1;
-    ret |= clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, global_item_size, local_item_size, 0, NULL, NULL);
-    
+    ret |= clSetKernelArg(kernel, 0, sizeof(cl_mem), &res_mem);
+    memcpy(global_item_size, (size_t[3]) { 1000000, 1, 1}, sizeof(global_item_size));
+    memcpy(local_item_size, (size_t[3]) { 1000, 1, 1}, sizeof(local_item_size));
+
+    ret |= clEnqueueNDRangeKernel(command_queue, kernel, 3, NULL, global_item_size, local_item_size, 0, NULL, NULL);
     
     // Read buffers
-    // ret |= clEnqueueReadBuffer(command_queue, pop_mem, CL_TRUE, 0, pop_size, seq_global, 0, NULL, NULL);
-    // ret |= clReleaseMemObject(pop_mem);
+    // cl_ulong result;
+    ret |= clEnqueueReadBuffer(command_queue, res_mem, CL_TRUE, 0, sizeof(res), &res, 0, NULL, NULL);
+    ret |= clReleaseMemObject(res_mem);
 
     clReleaseKernel(kernel);
 
@@ -75,13 +95,19 @@ int main(int argc, char *argv[])
 
 #pragma region KERNEL_POST_EXEC
 
+    printf("Result: %d\n", res);
+    
+    ftime(&progEnd);
+    printf("Program ended in %.3f seconds.\n", (1000 * (progEnd.time - progStart.time) + (progEnd.millitm - progStart.millitm)) / 1000.f); 
+
 #pragma endregion KERNEL_POST_EXEC
 
 
 #pragma region OPENCL_CLEAN
 
+    printf("\n");
     if (ret == 0)
-        printf("opencl success.\n", ret);
+        printf("opencl success.\n");
     else
         printf("opencl error: [%d]\n", ret);
 
@@ -93,7 +119,6 @@ int main(int argc, char *argv[])
     clReleaseContext(context);
 
 #pragma endregion OPENCL_CLEAN
-
     return 0;
 }
 
