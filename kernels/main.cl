@@ -16,6 +16,7 @@ int countCollatz(int n)
         {
             n = 3 * n + 1;
         }
+        //printf("Co: %d->%d\n", i, n);
     }
     // printf("CPT: %d->%d\n", i, cpt);
     return cpt;
@@ -23,6 +24,7 @@ int countCollatz(int n)
 
 kernel void main(global int* res)
 {
-    int i = get_global_id(0)+1;
-    atomic_max(res, countCollatz(i));
+    int i = get_global_id(0);
+    //printf("%d\n", i);
+    res[i] = countCollatz(i+1);
 }

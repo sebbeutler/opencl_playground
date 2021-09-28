@@ -67,11 +67,13 @@ int main(int argc, char *argv[])
     
     cl_kernel kernel;
 
-    int res;
+    size_t res_size = sizeof(int) * 1000000;
+    int* res = malloc(res_size);
+    
     cl_mem res_mem =  clCreateBuffer(
         context,
         CL_MEM_READ_WRITE,
-        sizeof(res),
+        res_size,
         NULL,
         &ret);
     
@@ -85,7 +87,7 @@ int main(int argc, char *argv[])
     
     // Read buffers
     // cl_ulong result;
-    ret |= clEnqueueReadBuffer(command_queue, res_mem, CL_TRUE, 0, sizeof(res), &res, 0, NULL, NULL);
+    ret |= clEnqueueReadBuffer(command_queue, res_mem, CL_TRUE, 0, res_size, res, 0, NULL, NULL);
     ret |= clReleaseMemObject(res_mem);
 
     clReleaseKernel(kernel);
@@ -95,7 +97,12 @@ int main(int argc, char *argv[])
 
 #pragma region KERNEL_POST_EXEC
 
-    printf("Result: %d\n", res);
+    int max = 0;
+    for (int i=0; i<1000000; i++)
+    {
+        max = max(max, res[i]);
+    }
+    printf("Result: %d\n", max);
     
     ftime(&progEnd);
     printf("Program ended in %.3f seconds.\n", (1000 * (progEnd.time - progStart.time) + (progEnd.millitm - progStart.millitm)) / 1000.f); 
