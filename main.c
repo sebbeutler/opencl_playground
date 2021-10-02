@@ -1,19 +1,49 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdbool.h>
 #include <time.h>
-#include <sys\timeb.h>
+#include <stdint.h>
 
 #include <CL/cl.h>
+#include <SDL.h>
+
+#include "data_structures/clist.h"
+#include "ui.h"
+
+#include <sys\timeb.h> 
 
 #define MAX_SOURCE_SIZE (0x100000)
 
-struct timeb progStart, progEnd;
-
+void onStart(int argc, char* argv[]);
+void onExit(void);
 cl_program load_program(cl_context context, char* filename, cl_int* errcode_ret);
+bool draw();
+void event(SDL_Event* e);
+
+cl_int ret = 0;
+cl_program program;
+cl_command_queue command_queue;
+cl_kernel kernel;
+size_t global_item_size[3];
+size_t local_item_size[3];
+
+typedef struct Particle
+{
+    float x;
+    float y;
+    float vX;
+    float vY;
+} Particle;
+
+#define PARTICLE_COUNT 200000
+
+Particle particles[PARTICLE_COUNT];
+cl_mem particles_mem;
+struct timeb deltaTimeStart, deltaTimeEnd;
 
 char BIN_PATH[255];
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     strcpy(BIN_PATH, argv[0]);
     for (size_t i = strlen(BIN_PATH) - 1; i >= 0; i--)
@@ -27,15 +57,12 @@ int main(int argc, char *argv[])
 
 #pragma region OPENCL_INIT
 
-    cl_int ret = 0;
-    size_t global_item_size[3];
-    size_t local_item_size[3];
     cl_platform_id platform_id = NULL;
     cl_device_id device_id = NULL;
     ret |= clGetPlatformIDs(1, &platform_id, NULL);
     ret |= clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_DEFAULT, 1, &device_id, NULL);
     cl_context context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &ret);
-    cl_command_queue command_queue = clCreateCommandQueue(context, device_id, 0, &ret);
+    command_queue = clCreateCommandQueue(context, device_id, 0, &ret);
     
     size_t info;
     clGetDeviceInfo(
@@ -52,11 +79,9 @@ int main(int argc, char *argv[])
 
 #pragma endregion OPENCL_INIT
 
-#pragma region KERNEL_EXEC
+#pragma region KERNEL_EXEC 
 
-    ftime(&progStart); 
-
-    cl_program program = load_program(context, "kernels/main.cl", &ret);
+    program = load_program(context, "main.cl", &ret);
     ret |= clBuildProgram(program, 1, &device_id, NULL, NULL, NULL);
     
     size_t len = 0;
@@ -64,48 +89,33 @@ int main(int argc, char *argv[])
     char *buffer = calloc(len, sizeof(char));
     clGetProgramBuildInfo(program, device_id, CL_PROGRAM_BUILD_LOG, len, buffer, NULL);
     printf("%s\n", buffer);
-    
-    cl_kernel kernel;
 
-    size_t res_size = sizeof(int) * 1000000;
-    int* res = malloc(res_size);
-    
-    cl_mem res_mem =  clCreateBuffer(
-        context,
-        CL_MEM_READ_WRITE,
-        res_size,
-        NULL,
-        &ret);
+    int width = sqrt(PARTICLE_COUNT);
+    int offsetX = 100;
+    int offsetY = 150;
+    for (int i = 0; i < width; i++)
+    {
+        for (int j = 0; j < width; j++)
+        {
+            particles[i * width + j ] = (Particle) { offsetX + j, offsetY + i, 0, 0 };
+        }   
+    }
+
+    particles_mem = clCreateBuffer(context, CL_MEM_COPY_HOST_PTR, sizeof(particles), particles, &ret);
+    // clEnqueueWriteBuffer(command_queue, particles_mem, CL_TRUE, 0, sizeof(particles), particles, 0, NULL, NULL);
     
     // Run kernel > main
     kernel = clCreateKernel(program, "main", &ret);
-    ret |= clSetKernelArg(kernel, 0, sizeof(cl_mem), &res_mem);
-    memcpy(global_item_size, (size_t[3]) { 1000000, 1, 1}, sizeof(global_item_size));
-    memcpy(local_item_size, (size_t[3]) { 1000, 1, 1}, sizeof(local_item_size));
-
-    ret |= clEnqueueNDRangeKernel(command_queue, kernel, 3, NULL, global_item_size, local_item_size, 0, NULL, NULL);
-    
-    // Read buffers
-    // cl_ulong result;
-    ret |= clEnqueueReadBuffer(command_queue, res_mem, CL_TRUE, 0, res_size, res, 0, NULL, NULL);
-    ret |= clReleaseMemObject(res_mem);
-
-    clReleaseKernel(kernel);
-
+    global_item_size[0] = PARTICLE_COUNT;
+    local_item_size[0] = 1000;
+    ftime(&deltaTimeStart);
 
 #pragma endregion KERNEL_EXEC
 
 #pragma region KERNEL_POST_EXEC
 
-    int max = 0;
-    for (int i=0; i<1000000; i++)
-    {
-        max = max(max, res[i]);
-    }
-    printf("Result: %d\n", max);
-    
-    ftime(&progEnd);
-    printf("Program ended in %.3f seconds.\n", (1000 * (progEnd.time - progStart.time) + (progEnd.millitm - progStart.millitm)) / 1000.f); 
+    ui_init();
+    ui_run(&draw, &event);
 
 #pragma endregion KERNEL_POST_EXEC
 
@@ -119,6 +129,8 @@ int main(int argc, char *argv[])
         printf("opencl error: [%d]\n", ret);
 
     // clean
+    clReleaseMemObject(particles_mem);
+    clReleaseKernel(kernel);
     clFlush(command_queue);
     clFinish(command_queue);
     clReleaseCommandQueue(command_queue);
@@ -127,6 +139,46 @@ int main(int argc, char *argv[])
 
 #pragma endregion OPENCL_CLEAN
     return 0;
+}
+
+float speed = 1;
+bool applyForce = false;
+int mx = 0, my = 0;
+bool draw()
+{
+    ftime(&deltaTimeEnd);
+    double dT = (1000 * (deltaTimeEnd.time - deltaTimeStart.time) + (deltaTimeEnd.millitm - deltaTimeStart.millitm)) / 1000.f;
+
+    clSetKernelArg(kernel, 0, sizeof(cl_mem), &particles_mem);
+    clSetKernelArg(kernel, 1, sizeof(double), &dT);
+    clSetKernelArg(kernel, 2, sizeof(int), &mx);
+    clSetKernelArg(kernel, 3, sizeof(int), &my);
+    ret |= clEnqueueNDRangeKernel(command_queue, kernel, 1, NULL, global_item_size, local_item_size, 0, NULL, NULL);
+    clEnqueueReadBuffer(command_queue, particles_mem, CL_TRUE, 0, sizeof(particles), particles, 0, NULL, NULL);
+    ftime(&deltaTimeStart);
+    
+    SDL_SetRenderDrawColor( ui_renderer, 235, 203, 139, 255 );
+    for (int i = 0; i < PARTICLE_COUNT; i++)
+    {
+        SDL_RenderDrawPoint(ui_renderer, particles[i].x, particles[i].y);
+    }
+    return true;
+}
+
+void event(SDL_Event* e)
+{
+    switch ( e->type ) {
+        case SDL_MOUSEBUTTONDOWN:
+            applyForce = true;
+            break;
+        case SDL_MOUSEBUTTONUP:
+            applyForce = false; 
+            break;
+        case SDL_MOUSEMOTION:
+            mx = e->button.x;
+            my = e->button.y;
+            break;
+    }
 }
 
 cl_program load_program(cl_context context, char* filename, cl_int* errcode_ret)
@@ -156,3 +208,38 @@ cl_program load_program(cl_context context, char* filename, cl_int* errcode_ret)
     return clCreateProgramWithSource(context, 1, (const char **)&source_str, (const size_t *)&source_size, errcode_ret);
 }
 
+#ifdef _WIN32
+#include <sys\timeb.h> 
+struct timeb progStart, progEnd;
+#endif // !_WIN32
+
+void onStart(int argc, char* argv[])
+{
+    printf(
+" _                                   \n"
+"| |                                  \n"
+"| | ___ __ ___   ___  __ _ _ __  ___ \n"
+"| |/ / '_ ` _ \\ / _ \\/ _` | '_ \\/ __|\n"
+"|   <| | | | | |  __/ (_| | | | \\__ \\\n"
+"|_|\\_\\_| |_| |_|\\___|\\__,_|_| |_|___/\n");
+    // Add function on program exit event
+    atexit(&onExit);
+    
+#ifdef _WIN32
+    // Save the time when the program starts to get the execution time later
+    ftime(&progStart);
+#endif // !_WIN32
+}
+
+void onExit(void)
+{
+
+#ifdef _WIN32
+
+    ftime(&progEnd);
+    
+    printf("\n\n---------------------------------------------------------------------------------------------------------------------\n");
+    printf("Program ended in %.3f seconds.\n", (1000 * (progEnd.time - progStart.time) + (progEnd.millitm - progStart.millitm)) / 1000.f);
+    //system("pause");
+#endif // !_WIN32
+}
